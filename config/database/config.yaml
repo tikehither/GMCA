@@ -10,7 +10,7 @@ server:
 database:
   type: mysql
   host: localhost  # 宿主机连接
-  port: 3307
+  port: 3306
   database: CA
   user: root
   password: rootpassword
