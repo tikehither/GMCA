@@ -1,0 +1,7 @@
+# Client 依赖
+PyQt5==5.15.9
+PyQt5-sip==12.13.0
+gmssl==3.2.2
+cryptography==42.0.5
+asyncio==3.4.3
+python-dotenv==1.0.0

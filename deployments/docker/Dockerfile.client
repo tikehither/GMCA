@@ -1,0 +1,49 @@
+FROM python:3.9-slim
+
+WORKDIR /app
+
+# 安装系统依赖（包括 GUI 相关）
+RUN apt-get update && apt-get install -y \
+    libgl1-mesa-glx \
+    libglib2.0-0 \
+    libsm6 \
+    libxext6 \
+    libxrender-dev \
+    libxcb-xinerama0 \
+    libxkbcommon-x11-0 \
+    libxcb-icccm4 \
+    libxcb-image0 \
+    libxcb-keysyms1 \
+    libxcb-randr0 \
+    libxcb-render-util0 \
+    libxcb-shape0 \
+    libxcb-sync1 \
+    libxcb-xfixes0 \
+    libxcb-xinerama0 \
+    xauth \
+    xvfb \
+    && rm -rf /var/lib/apt/lists/*
+
+# 复制 requirements 文件
+COPY requirements-client.txt .
+
+# 安装 Python 依赖
+RUN pip install --no-cache-dir -r requirements-client.txt
+
+# 复制客户端代码
+COPY client/ .
+
+# 创建必要的目录
+RUN mkdir -p keys
+
+# 创建非 root 用户
+RUN useradd -m -u 1001 appuser && chown -R appuser:appuser /app
+USER appuser
+
+# 设置显示环境变量（用于 GUI）
+ENV DISPLAY=:99
+ENV QT_DEBUG_PLUGINS=1
+ENV QT_QPA_PLATFORM=offscreen
+
+# 启动 Xvfb 和客户端
+CMD sh -c 'Xvfb :99 -screen 0 1024x768x24 & sleep 2 && python CAGM.py'

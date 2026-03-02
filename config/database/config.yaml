@@ -1,0 +1,47 @@
+# 测试配置文件 - 宿主机版本
+
+# 服务器配置
+server:
+  host: 0.0.0.0
+  port: 8888
+  max_connections: 100
+
+# 数据库配置 - 宿主机连接
+database:
+  type: mysql
+  host: localhost  # 宿主机连接
+  port: 3307
+  database: CA
+  user: root
+  password: rootpassword
+  pool_size: 5
+  pool_name: 'mypool'
+  connect_timeout: 30
+  retry_count: 5
+  retry_delay: 3
+
+# 安全配置
+security:
+  key_size: 2048
+  cert_validity_days: 365
+  session_timeout: 3600
+  max_failed_attempts: 5
+  lockout_duration: 300
+
+# 安全日志配置
+secure_logging:
+  enabled: true
+  encrypt_sensitive_fields: true
+  hash_verification: true
+  audit_role: 'auditor'
+  log_dir: 'logs'
+  log_files:
+    certificate: 'certificate_log.json'
+    admin: 'admin_log.json'
+    audit: 'audit_log.json'
+    secure: 'secure_log.json'
+  sensitive_fields:
+    certificate: ['subject_key', 'issuer_key']
+    admin: ['ip_address', 'session_key', 'password']
+  hsm_protection: true
+  integrity_check_interval: 86400

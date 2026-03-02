@@ -1,0 +1,12 @@
+# Server 依赖
+mysql-connector-python==8.1.0
+PyYAML==6.0.1
+cryptography==42.0.5
+asyncio==3.4.3
+gmssl==3.2.2
+python-dotenv==1.0.0
+tenacity==8.2.3
+pymysql==1.1.0
+SQLAlchemy==2.0.19
+pytest==7.4.4
+pytest-asyncio==0.21.1
