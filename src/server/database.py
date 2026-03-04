@@ -52,8 +52,6 @@ class DatabaseManager(DatabaseInterface):
             if missing_fields:
                 raise ValueError(f"缺少必要的数据库配置项: {', '.join(missing_fields)}")
 
-            self._init_database_with_retry()
-            
             # 初始化加密工具
             try:
                 if GMSSL_AVAILABLE:
@@ -62,6 +60,8 @@ class DatabaseManager(DatabaseInterface):
                     self.crypto = None
             except Exception as e:
                 self.log(f"初始化加密工具失败: {str(e)}")
+
+            self._init_database_with_retry()
         except Exception as e:
             self.log(f"数据库管理器初始化失败: {str(e)}")
             raise
@@ -274,7 +274,7 @@ class DatabaseManager(DatabaseInterface):
                     serial_number VARCHAR(64) UNIQUE NOT NULL,
                     subject_name VARCHAR(255) NOT NULL,
                     public_key_fingerprint VARCHAR(64) NOT NULL,
-                    status ENUM('pending', 'valid', 'revoked') DEFAULT 'pending',
+                    status ENUM('pending', 'valid', 'revoked', 'rejected') DEFAULT 'pending',
                     issue_date DATETIME NOT NULL,
                     expiry_date DATETIME NOT NULL,
                     signature TEXT NOT NULL,
@@ -282,7 +282,7 @@ class DatabaseManager(DatabaseInterface):
                     organization VARCHAR(255),
                     department VARCHAR(255),
                     email VARCHAR(255),
-                    usage VARCHAR(255),
+                    usage_purpose VARCHAR(255),
                     remarks TEXT,
                     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
                     FOREIGN KEY (template_id) REFERENCES certificate_templates(id)
@@ -404,13 +404,13 @@ class DatabaseManager(DatabaseInterface):
             if template_id is not None:
                 cursor.execute("""
                     INSERT INTO certificates 
-                    (serial_number, subject_name, public_key, issue_date, expiry_date, signature, template_id)
+                    (serial_number, subject_name, public_key_fingerprint, issue_date, expiry_date, signature, template_id)
                     VALUES (%s, %s, %s, %s, %s, %s, %s)
                 """, (serial_number, subject_name, public_key, issue_date, expiry_date, signature, template_id))
             else:
                 cursor.execute("""
                     INSERT INTO certificates 
-                    (serial_number, subject_name, public_key, issue_date, expiry_date, signature)
+                    (serial_number, subject_name, public_key_fingerprint, issue_date, expiry_date, signature)
                     VALUES (%s, %s, %s, %s, %s, %s)
                 """, (serial_number, subject_name, public_key, issue_date, expiry_date, signature))
             conn.commit()
@@ -504,6 +504,18 @@ class DatabaseManager(DatabaseInterface):
         finally:
             cursor.close()
             conn.close()
+
+    def close_connection(self, conn):
+        """安全关闭连接，归还到连接池
+        
+        Args:
+            conn: 数据库连接对象
+        """
+        try:
+            if conn:
+                conn.close()
+        except Exception as e:
+            self.log(f"关闭数据库连接时出错: {e}")
 
     def add_user(self, username, password_hash, role='user'):
         """添加用户"""

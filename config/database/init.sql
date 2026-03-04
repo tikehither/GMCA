@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS certificates (
     serial_number VARCHAR(64) UNIQUE NOT NULL,
     subject_name VARCHAR(255) NOT NULL,
     public_key TEXT NOT NULL,
-    status ENUM('pending', 'valid', 'revoked') DEFAULT 'pending',
+    status ENUM('pending', 'valid', 'revoked', 'rejected') DEFAULT 'pending',
     issue_date DATETIME NOT NULL,
     expiry_date DATETIME NOT NULL,
     signature TEXT NOT NULL,

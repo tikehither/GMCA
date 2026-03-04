@@ -361,6 +361,35 @@ class GMSCrypto:
             print(f"SM2 验证签名失败: {e}")
             return False
     
+    def _sm4_pad(self, data: bytes) -> bytes:
+        """PKCS#7 填充
+        
+        Args:
+            data: 原始数据
+            
+        Returns:
+            填充后的数据
+        """
+        padding = 16 - (len(data) % 16)
+        return data + bytes([padding] * padding)
+    
+    def _sm4_unpad(self, data: bytes) -> bytes:
+        """PKCS#7 去填充
+        
+        Args:
+            data: 填充后的数据
+            
+        Returns:
+            去除填充后的原始数据
+            
+        Raises:
+            ValueError: 填充无效时抛出异常
+        """
+        padding = data[-1]
+        if padding < 1 or padding > 16:
+            raise ValueError("无效的填充")
+        return data[:-padding]
+    
     def sm4_encrypt(self, plaintext: str) -> Optional[str]:
         """SM4 加密 (ECB模式)
         
@@ -378,10 +407,8 @@ class GMSCrypto:
             sm4 = CryptSM4()
             sm4.set_key(self.sm4_key, SM4_ENCRYPT)
             
-            # 数据填充
-            data = plaintext.encode('utf-8')
-            padding = 16 - (len(data) % 16)
-            data += bytes([padding] * padding)
+            # 使用辅助方法进行填充
+            data = self._sm4_pad(plaintext.encode('utf-8'))
             
             # ECB 模式加密
             encrypted = sm4.crypt_ecb(data)
@@ -416,12 +443,10 @@ class GMSCrypto:
             # ECB 模式解密
             decrypted = sm4.crypt_ecb(encrypted)
             
-            # 去除填充
-            padding = decrypted[-1]
-            if padding < 1 or padding > 16:
-                raise ValueError("无效的填充")
+            # 使用辅助方法去填充
+            unpadded = self._sm4_unpad(decrypted)
             
-            return decrypted[:-padding].decode('utf-8')
+            return unpadded.decode('utf-8')
             
         except Exception as e:
             print(f"SM4 解密失败: {e}")
@@ -444,10 +469,8 @@ class GMSCrypto:
             sm4 = CryptSM4()
             sm4.set_key(key, SM4_ENCRYPT)
             
-            # 数据填充
-            data = plaintext.encode('utf-8')
-            padding = 16 - (len(data) % 16)
-            data += bytes([padding] * padding)
+            # 使用辅助方法进行填充
+            data = self._sm4_pad(plaintext.encode('utf-8'))
             
             # ECB 模式加密
             encrypted = sm4.crypt_ecb(data)
@@ -481,12 +504,10 @@ class GMSCrypto:
             # ECB 模式解密
             decrypted = sm4.crypt_ecb(encrypted)
             
-            # 去除填充
-            padding = decrypted[-1]
-            if padding < 1 or padding > 16:
-                raise ValueError("无效的填充")
+            # 使用辅助方法去填充
+            unpadded = self._sm4_unpad(decrypted)
             
-            return decrypted[:-padding].decode('utf-8')
+            return unpadded.decode('utf-8')
             
         except Exception as e:
             print(f"SM4 解密失败: {e}")

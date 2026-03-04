@@ -812,7 +812,7 @@ class CAServer:
                 sql = """
                     INSERT INTO certificates 
                     (serial_number, subject_name, public_key_fingerprint, status, issue_date, expiry_date, 
-                     signature, template_id, organization, department, email, usage_purpose, user_info)
+                     signature, template_id, organization, department, email, usage_purpose, remarks)
                     VALUES (%s, %s, %s, 'pending', %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """
                 params = (
@@ -1251,15 +1251,11 @@ class CAServer:
                     SET status = 'valid',
                         issue_date = %s,
                         expiry_date = %s,
-                        user_info = %s,
-                        cert_hash = %s,
                         signature = %s
                     WHERE serial_number = %s
                 """, (
                     issue_date,
                     expiry_date,
-                    user_info_json,
-                    cert_hash,
                     signature,
                     serial_number
                 ))
@@ -1321,7 +1317,7 @@ class CAServer:
             
             # 验证当前密码是否正确
             conn = self.db.get_connection()
-            cursor = conn.cursor(dictionary=True)
+            cursor = conn.cursor(dictionary=True, buffered=True)
             try:
                 # 如果提供了用户ID，则同时检查用户ID和密码哈希
                 if user_id:
@@ -1339,14 +1335,14 @@ class CAServer:
                 
                 if not user:
                     cursor.close()
-                    conn.close()
+                    self.db.close_connection(conn)
                     return {'status': 'error', 'message': '当前密码不正确'}
                 
                 # 关闭当前游标，为更新操作创建新游标
                 cursor.close()
                 
                 # 创建新游标执行更新操作
-                update_cursor = conn.cursor()
+                update_cursor = conn.cursor(buffered=True)
                 update_cursor.execute("""
                     UPDATE users 
                     SET password_hash = %s 
@@ -1355,13 +1351,13 @@ class CAServer:
                 
                 conn.commit()
                 update_cursor.close()
-                conn.close()
+                self.db.close_connection(conn)
                 self.log(f"用户 {user['username']} 修改了密码")
                 return {'status': 'success', 'message': '密码修改成功'}
             except Exception as db_err:
                 if conn:
                     conn.rollback()
-                    conn.close()
+                    self.db.close_connection(conn)
                 raise db_err
             finally:
                 if cursor:

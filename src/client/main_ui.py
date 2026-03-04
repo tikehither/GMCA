@@ -932,15 +932,6 @@ class CAClient(QMainWindow):
                 subject_name += f",emailAddress={application_data['email']}"
             subject_name += ",C=CN"  # 默认国家为中国
             
-            # 使用crypto_manager生成证书申请请求(CSR)
-            self.apply_result.setText("正在生成证书申请请求...")
-            csr_content = self.crypto_manager.generate_certificate_request(subject_name)
-            
-            if not csr_content:
-                QMessageBox.warning(self, '失败', '生成证书申请请求失败')
-                self.apply_result.setText("生成证书申请请求失败")
-                return
-            
             # 构建申请数据
             request_data = {
                 'template_id': application_data['template_id'],
@@ -962,33 +953,16 @@ class CAClient(QMainWindow):
             if response and response.get('status') == 'success':
                 cert_data = response.get('data', {})
                 
-                # 如果服务器返回了证书数据，显示成功信息
+                # 显示成功信息
                 self.apply_result.setText(
                     f"证书申请成功！\n\n"
                     f"证书序列号: {cert_data.get('serial_number', '未知')}\n"
                     f"主题名称: {cert_data.get('subject_name', subject_name)}\n"
                     f"状态: {cert_data.get('status', '待审核')}\n"
-                    f"申请时间: {cert_data.get('issue_date', '未知')}\n"
-                    f"公钥指纹: {cert_data.get('public_key_fingerprint', '未知')}"
+                    f"申请时间: {cert_data.get('issue_date', '未知')}"
                 )
                 
-                # 提示用户保存密钥对（如果需要）
-                save_keys = QMessageBox.question(
-                    self, 
-                    '保存密钥对', 
-                    '证书申请已提交成功！\n是否要保存当前的密钥对到本地？',
-                    QMessageBox.Yes | QMessageBox.No,
-                    QMessageBox.Yes
-                )
-                
-                if save_keys == QMessageBox.Yes:
-                    # 保存密钥对到本地
-                    key_save_dir = os.path.join(self.cert_save_dir, 'keys')
-                    if self.crypto_manager.save_sm2_key_pair(key_save_dir):
-                        QMessageBox.information(self, '成功', f'密钥对已保存到:\n{key_save_dir}')
-                    else:
-                        QMessageBox.warning(self, '警告', '密钥对保存失败，请手动备份')
-                
+                # 简单提示成功，不需要下载证书申请
                 QMessageBox.information(self, '成功', '证书申请已提交，等待服务器审核！')
             else:
                 error_msg = response.get('message', '申请失败') if response else '申请失败，请稍后重试'
