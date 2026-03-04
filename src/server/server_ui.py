@@ -515,6 +515,7 @@ class ServerUI(QMainWindow):
         self.server = None
         self.server_thread = None
         self.full_logs = []  # 存储完整的日志记录
+        self.config_path = self._get_config_path()
 
         # 设置窗口属性
         self.setWindowTitle('CA服务器管理界面')
@@ -546,7 +547,6 @@ class ServerUI(QMainWindow):
         else:
             # 如果没有找到logging键，使用默认的server.log
             log_file = os.path.join(secure_logger_manager.log_dir, 'server.log')
-            self.append_log("警告: 配置中未找到'logging'键，使用默认日志文件'server.log'")
         try:
             if os.path.exists(log_file):
                 with open(log_file, 'r', encoding='utf-8') as f:
@@ -555,7 +555,6 @@ class ServerUI(QMainWindow):
                     self.log_text.clear()
                     self.log_text.append(log_content)
             else:
-                self.append_log(f"警告: 日志文件 {log_file} 不存在")
                 self.full_logs = []
         except Exception as e:
             self.append_log(f"加载日志失败: {str(e)}")
@@ -690,7 +689,7 @@ class ServerUI(QMainWindow):
         # 创建证书表格
         self.cert_table = QTableWidget()
         self.cert_table.setColumnCount(9)
-        self.cert_table.setHorizontalHeaderLabels(['序列号', '公钥', '申请者', '状态', '申请时间', '签发时间', '到期时间', '用途', '操作'])
+        self.cert_table.setHorizontalHeaderLabels(['序列号', '公钥指纹', '申请者', '状态', '申请时间', '签发时间', '到期时间', '用途', '操作'])
         self.cert_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         cert_list_layout.addWidget(self.cert_table)
 
@@ -932,10 +931,9 @@ class ServerUI(QMainWindow):
                     cursor.execute("""
                         SELECT 
                             serial_number, 
-                            public_key, 
+                            public_key_fingerprint, 
                             subject_name, 
                             status, 
-                            NULL AS submit_date,  -- 证书没有申请时间
                             issue_date, 
                             expiry_date, 
                             template_id
@@ -948,23 +946,22 @@ class ServerUI(QMainWindow):
                     self.append_log(f"查询证书表失败: {err}")
                     certificates = []
             
-                # 获取待审核的证书申请（certificate_applications表）
+                # 获取待审核的证书申请（certificates表中pending状态的记录）
                 try:
                     cursor.execute("""
                         SELECT 
                             serial_number, 
-                            public_key, 
+                            public_key_fingerprint, 
                             subject_name, 
                             organization,
                             status, 
-                            submit_date,
-                            NULL AS issue_date,  -- 申请没有签发时间
-                            NULL AS expiry_date, -- 申请没有到期时间
-                            `usage` AS usage_purpose,
+                            issue_date,
+                            expiry_date,
+                            usage_purpose,
                             template_id
-                        FROM certificate_applications
+                        FROM certificates
                         WHERE status = 'pending'
-                        ORDER BY submit_date DESC
+                        ORDER BY issue_date DESC
                     """)
                     applications = cursor.fetchall()
                 except mysql.connector.Error as err:
@@ -985,11 +982,11 @@ class ServerUI(QMainWindow):
                     # 序列号
                     self.cert_table.setItem(i, 0, QTableWidgetItem(cert['serial_number']))
                     
-                    # 公钥（截断显示）
-                    public_key = cert.get('public_key', '-')
-                    if len(public_key) > 30:
-                        public_key = public_key[:30] + '...'
-                    self.cert_table.setItem(i, 1, QTableWidgetItem(public_key))
+                    # 公钥指纹（截断显示）
+                    public_key_fingerprint = cert.get('public_key_fingerprint', cert.get('public_key', '-'))
+                    if len(public_key_fingerprint) > 30:
+                        public_key_fingerprint = public_key_fingerprint[:30] + '...'
+                    self.cert_table.setItem(i, 1, QTableWidgetItem(public_key_fingerprint))
                 
                     # 申请者（从subject_name解析CN）
                     subject_name = cert.get('subject_name', '-')
@@ -1049,7 +1046,7 @@ class ServerUI(QMainWindow):
                     usage = '-'
                     template_id = cert.get('template_id')
                 
-                    # 如果是申请记录，优先使用自身的usage字段
+                    # 优先使用自身的usage_purpose字段
                     if 'usage_purpose' in cert and cert['usage_purpose']:
                         usage = cert['usage_purpose']
                     # 如果未填写或无效，尝试从模板获取
@@ -1283,11 +1280,22 @@ class ServerUI(QMainWindow):
             
     def update_status(self):
         """更新服务器状态显示"""
-        # 从服务器实例获取当前连接数
-        if self.server and self.is_running and hasattr(self.server, 'get_active_connections'):
-            self.connected_clients = self.server.get_active_connections()
+        try:
+            # 从服务器实例获取当前连接数
+            if self.server and self.is_running and hasattr(self.server, 'get_active_connections'):
+                self.connected_clients = self.server.get_active_connections()
+        except KeyboardInterrupt:
+            raise
+        except Exception:
+            pass
             
-        self.clients_label.setText(str(self.connected_clients))
+        try:
+            if hasattr(self, 'clients_label') and self.clients_label:
+                self.clients_label.setText(str(self.connected_clients))
+        except KeyboardInterrupt:
+            raise
+        except Exception:
+            pass
 
     def append_log(self, message):
         """添加日志到显示区域"""
@@ -1514,6 +1522,11 @@ class ServerUI(QMainWindow):
                 del self.server
                 self.server = None
 
+            if hasattr(self, 'timer') and self.timer:
+                self.timer.stop()
+                self.timer.timeout.disconnect(self.update_status)
+                self.timer = None
+
             # 强制GC
             import gc
             gc.collect()
@@ -1527,9 +1540,23 @@ class ServerUI(QMainWindow):
         self.start_btn.setEnabled(not running)
         self.stop_btn.setEnabled(running)
 
+    def _get_config_path(self):
+        """获取配置文件路径"""
+        import os
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        project_root = os.path.dirname(os.path.dirname(script_dir))
+        return os.path.join(project_root, 'config', 'database', 'config.yaml')
+
     def handle_server_stopped(self):
         """处理服务器停止"""
         self.is_running = False
+        if hasattr(self, 'timer') and self.timer:
+            self.timer.stop()
+            try:
+                self.timer.timeout.disconnect(self.update_status)
+            except Exception:
+                pass
+            self.timer = None
         self._update_ui_state(False)
         self.append_log('服务器已停止')
 
@@ -1544,8 +1571,10 @@ class ServerUI(QMainWindow):
             import yaml
             import os
             
+            config_path = self.config_path
+            
             # 读取原始配置文件，保留注释和格式
-            with open('config.yaml', 'r', encoding='utf-8') as f:
+            with open(config_path, 'r', encoding='utf-8') as f:
                 original_config = yaml.safe_load(f)
             
             # 从UI获取新的配置值
@@ -1586,14 +1615,14 @@ class ServerUI(QMainWindow):
             }
             
             # 创建备份文件
-            if os.path.exists('config.yaml'):
-                backup_path = 'config.yaml.bak'
-                with open('config.yaml', 'r', encoding='utf-8') as src, open(backup_path, 'w', encoding='utf-8') as dst:
+            if os.path.exists(config_path):
+                backup_path = config_path + '.bak'
+                with open(config_path, 'r', encoding='utf-8') as src, open(backup_path, 'w', encoding='utf-8') as dst:
                     dst.write(src.read())
                 self.append_log(f'已创建配置文件备份: {backup_path}')
             
             # 写入新配置，保持格式
-            with open('config.yaml', 'w', encoding='utf-8') as f:
+            with open(config_path, 'w', encoding='utf-8') as f:
                 # 添加文件头注释
                 f.write("# CA服务器配置文件\n\n")
                 
@@ -1628,7 +1657,8 @@ class ServerUI(QMainWindow):
     def load_config(self):
         try:
             import yaml
-            with open('config.yaml', 'r', encoding='utf-8') as f:
+            config_path = self.config_path
+            with open(config_path, 'r', encoding='utf-8') as f:
                 config = yaml.safe_load(f)
 
             # 加载服务器配置
@@ -1760,6 +1790,12 @@ def main():
 
         # 设置全局异常处理器
         def global_exception_handler(exctype, value, traceback):
+            # 不捕获 KeyboardInterrupt
+            if exctype == KeyboardInterrupt:
+                print("程序被用户中断", file=sys.stderr)
+                sys.__excepthook__(exctype, value, traceback)
+                return
+            
             error_msg = f"未捕获的异常: {exctype.__name__}: {str(value)}"
             if hasattr(server_ui, 'append_log'):
                 server_ui.append_log(error_msg)

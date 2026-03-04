@@ -10,7 +10,9 @@ from datetime import datetime
 from pathlib import Path
 from logging.handlers import RotatingFileHandler
 from typing import Dict, Optional, Any, List, Union
-from crypto_fixed import CryptoUtilsFixed as CryptoUtils
+
+# 导入国密加密工具
+from crypto_gmssl import GMSCrypto
 
 class SecureLoggerManager:
     """安全日志管理器
@@ -25,11 +27,13 @@ class SecureLoggerManager:
     """
     
     def __init__(self):
-        self.config_path = os.path.join(os.path.dirname(__file__), 'config.yaml')
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        project_root = os.path.dirname(os.path.dirname(script_dir))
+        self.config_path = os.path.join(project_root, 'config', 'database', 'config.yaml')
         self.logger = None
         self.ui_callback = None
-        self.crypto = CryptoUtils()
-        self.log_dir = Path(os.path.dirname(__file__)) / "logs"
+        self.crypto = GMSCrypto()
+        self.log_dir = Path(script_dir) / "logs"
         self.log_dir.mkdir(exist_ok=True)
         self.secure_log_file = self.log_dir / "secure_log.json"
         self.audit_log_file = self.log_dir / "audit_log.json"
@@ -81,9 +85,9 @@ class SecureLoggerManager:
             self.logger = logging.getLogger('CA')
             self.logger.setLevel(getattr(logging, log_config.get('level', 'INFO')))
             
-            # 移除所有现有的处理器
-            for handler in self.logger.handlers[:]:
-                self.logger.removeHandler(handler)
+            # 如果已经初始化过，直接返回
+            if self.logger.handlers:
+                return
             
             # 添加控制台处理器
             console_handler = logging.StreamHandler()
@@ -119,15 +123,10 @@ class SecureLoggerManager:
     def log(self, message, level='info'):
         """记录普通日志"""
         if not self.logger:
-            print(message)
             return
         
         log_func = getattr(self.logger, level.lower(), self.logger.info)
         log_func(message)
-        
-        # 如果设置了UI回调，同时发送到UI
-        if self.ui_callback:
-            self.ui_callback(message)
     
     def _calculate_hash(self, data: Dict) -> str:
         """计算日志条目的SM3哈希值"""
@@ -148,7 +147,7 @@ class SecureLoggerManager:
                 value = str(value)
             
             # 使用SM4加密
-            encrypted_data = self.crypto.sm4_encrypt({'value': value})
+            encrypted_data = self.crypto.sm4_encrypt(value)
             if encrypted_data:
                 return f"ENCRYPTED:{encrypted_data}"
             return value

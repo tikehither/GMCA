@@ -79,12 +79,12 @@ docker run -d --name ca-mysql \
   mysql:8.0
 
 # 初始化数据库
-python src/server/init_db.py
+python src/server/database.py
 ```
 
 #### 启动CA服务器
 ```bash
-# 安装依赖
+# 安装服务器依赖
 pip install -r deployments/docker/requirements-server.txt
 
 # 启动服务器
@@ -115,6 +115,34 @@ docker-compose ps
 # 查看日志
 docker-compose logs -f server
 ```
+
+## 📦 依赖说明
+
+### 服务器端依赖
+服务器端需要以下依赖:
+```bash
+pip install -r deployments/docker/requirements-server.txt
+```
+
+主要依赖:
+- **mysql-connector-python**: MySQL数据库连接
+- **gmssl**: 国密算法(SM2/SM3/SM4)实现
+- **PyYAML**: YAML配置文件解析
+- **asyncio**: 异步网络通信
+- **cryptography**: 加密算法支持
+- **PyQt5**: 服务器UI界面(可选)
+
+### 客户端依赖
+客户端需要以下依赖:
+```bash
+pip install -r deployments/docker/requirements-client.txt
+```
+
+主要依赖:
+- **PyQt5**: 图形界面框架
+- **gmssl**: 国密算法(SM2/SM3/SM4)实现
+- **cryptography**: 加密算法支持
+- **asyncio**: 异步网络通信
 
 ## 🔐 SM3国密算法集成
 

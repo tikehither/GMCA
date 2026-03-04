@@ -1,7 +1,7 @@
 from PyQt5.QtWidgets import QWidget, QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QLabel, QLineEdit, QMessageBox, QApplication
 from PyQt5.QtCore import Qt
 import asyncio
-from crypto import CryptoManager
+from crypto_gmssl import ClientGMSCrypto as CryptoManager
 
 
 class LoginDialog(QDialog):
@@ -261,6 +261,9 @@ class LoginDialog(QDialog):
                         'username': username,
                         'role': role
                     }
+                    
+                    # 保存加密工具到客户端实例
+                    self.client.crypto = self.crypto
                     
                     # 登录成功，关闭登录对话框
                     self.accept()

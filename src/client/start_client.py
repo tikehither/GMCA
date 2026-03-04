@@ -14,7 +14,7 @@ import asyncio
 
 def get_server_config():
     """从环境变量获取服务器配置"""
-    server_host = os.environ.get('SERVER_HOST', 'server')  # Docker 容器名
+    server_host = os.environ.get('SERVER_HOST', '127.0.0.1')  # 默认使用本地回环地址
     server_port = int(os.environ.get('SERVER_PORT', '8888'))
     
     print(f"服务器配置: {server_host}:{server_port}")

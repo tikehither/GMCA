@@ -188,8 +188,28 @@ class AsyncClient(QThread):
             return False
             
         try:
-            # 不发送心跳包，只检查socket状态
-            return self._connection_event and self.sock is not None
+            # 检查socket是否仍然有效
+            # 尝试获取socket的错误状态
+            error = self.sock.getsockopt(socket.SOL_SOCKET, socket.SO_ERROR)
+            if error != 0:
+                self._connection_event = False
+                return False
+            
+            # 确保socket没有被关闭
+            # 通过尝试发送一个空字节来检查连接是否仍然有效
+            self.sock.setblocking(False)
+            try:
+                self.sock.send(b'')
+                self.sock.setblocking(True)
+                return True
+            except BlockingIOError:
+                # 这是预期的，表示连接仍然有效但没有数据可发送
+                self.sock.setblocking(True)
+                return True
+            except Exception:
+                # 任何异常都表示连接已断开
+                self._connection_event = False
+                return False
         except Exception:
             # 任何异常都视为连接已断开
             self._connection_event = False

@@ -10,10 +10,10 @@ server:
 database:
   type: mysql
   host: localhost  # 宿主机连接
-  port: 3307
+  port: 3306
   database: CA
   user: root
-  password: rootpassword
+  password: Tt153167..
   pool_size: 5
   pool_name: 'mypool'
   connect_timeout: 30
@@ -27,6 +27,14 @@ security:
   session_timeout: 3600
   max_failed_attempts: 5
   lockout_duration: 300
+
+# 日志配置
+logging:
+  level: INFO
+  file: server.log
+  max_size: 10485760
+  backup_count: 5
+  format: '[%(asctime)s] %(levelname)s: %(message)s'
 
 # 安全日志配置
 secure_logging:

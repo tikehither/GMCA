@@ -1,6 +1,7 @@
 import sys
 import traceback
 import socket
+import os
 
 # 导入secure_logger
 from secure_logger import secure_logger_manager as logger_manager
@@ -51,7 +52,6 @@ class LogRedirector(QObject):
                 lines = self.buffer.split('\n')
                 for line in lines[:-1]:
                     if line.strip():  # 只输出非空行
-                        logger_manager.log(line, "info")  # 使用secure_logger记录日志
                         self.log_signal.emit(line)
                 self.buffer = lines[-1]
         except Exception as e:
@@ -59,7 +59,6 @@ class LogRedirector(QObject):
 
     def flush(self):
         if self.buffer:
-            logger_manager.log(self.buffer, "info")  # 使用secure_logger记录日志
             self.log_signal.emit(self.buffer)
             self.buffer = ""
 
@@ -80,15 +79,15 @@ def get_network_info():
         logger_manager.log(error_msg, "error")
         return error_msg
 
-from init_db import DatabaseInitializer
+from database import DatabaseManager
 
 def init_database():
     """初始化数据库"""
     try:
-        logger_manager.log("正在初始化数据库...", "info")
-        initializer = DatabaseInitializer()
-        initializer.init_database_with_retry()
-        logger_manager.log("数据库初始化成功", "info")
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        project_root = os.path.dirname(os.path.dirname(script_dir))
+        config_path = os.path.join(project_root, 'config', 'database', 'config.yaml')
+        db_manager = DatabaseManager(log_callback=logger_manager.log)
     except Exception as e:
         error_msg = f"数据库初始化失败: {str(e)}\n{traceback.format_exc()}"
         logger_manager.log(error_msg, "error")

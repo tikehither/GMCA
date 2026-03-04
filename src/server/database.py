@@ -6,7 +6,15 @@ import mysql.connector.pooling
 import mysql.connector
 from database_interface import DatabaseInterface
 from threading import Lock
-from typing import Dict, Optional
+from typing import Dict, Optional, List
+import os
+
+# 导入国密加密工具
+try:
+    from crypto_gmssl import GMSCrypto
+    GMSSL_AVAILABLE = True
+except ImportError:
+    GMSSL_AVAILABLE = False
 
 
 class DatabaseManager(DatabaseInterface):
@@ -16,11 +24,15 @@ class DatabaseManager(DatabaseInterface):
         self.log_callback = log_callback or (lambda x: None)
         self.connection_pool = None
         self._pool_lock = Lock()  # 添加线程安全锁
-
+        self.crypto = None  # 用于密码哈希
+        
         try:
             import yaml
-            self.log("开始读取数据库配置")
-            with open('config.yaml', 'r', encoding='utf-8') as f:
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            project_root = os.path.dirname(os.path.dirname(script_dir))
+            config_path = os.path.join(project_root, 'config', 'database', 'config.yaml')
+            
+            with open(config_path, 'r', encoding='utf-8') as f:
                 config = yaml.safe_load(f)
 
             db_config = config.get('database', {})
@@ -40,74 +52,33 @@ class DatabaseManager(DatabaseInterface):
             if missing_fields:
                 raise ValueError(f"缺少必要的数据库配置项: {', '.join(missing_fields)}")
 
-            self.log(f"数据库配置已加载: {self.config['host']}:{self.config['port']}")
             self._init_database_with_retry()
+            
+            # 初始化加密工具
+            try:
+                if GMSSL_AVAILABLE:
+                    self.crypto = GMSCrypto()
+                else:
+                    self.crypto = None
+            except Exception as e:
+                self.log(f"初始化加密工具失败: {str(e)}")
         except Exception as e:
             self.log(f"数据库管理器初始化失败: {str(e)}")
             raise
 
     def log(self, message):
         """统一的日志处理"""
-        # 最外层try-except，确保日志方法绝不会崩溃
         try:
-            # 确保message是字符串
-            try:
-                if message is None:
-                    message = "<None>"
-                elif not isinstance(message, str):
-                    message = str(message)
-            except Exception:
-                message = "<无法转换的消息>"
-                
-            # 安全地检查和使用回调
-            try:
-                # 先检查self是否有效
-                if self is None:
-                    print("日志对象为None，无法使用回调")
-                # 检查log_callback属性
-                elif hasattr(self, 'log_callback'):
-                    # 安全获取回调
-                    try:
-                        callback = self.log_callback
-                    except Exception as attr_err:
-                        print(f"获取log_callback属性时出错: {str(attr_err)}")
-                        callback = None
-                        
-                    # 安全调用回调
-                    if callback is not None:
-                        try:
-                            if callable(callback):
-                                callback(message)
-                            else:
-                                print(f"日志回调不是可调用对象: {type(callback)}")
-                        except Exception as callback_err:
-                            print(f"日志回调异常: {str(callback_err)}")
-            except Exception as cb_check_err:
-                print(f"检查日志回调时出错: {str(cb_check_err)}")
+            if message is None:
+                message = "<None>"
+            elif not isinstance(message, str):
+                message = str(message)
             
-            # 安全地使用logging模块
-            try:
-                import sys
-                if 'logging' in sys.modules:
-                    try:
-                        import logging
-                        logging.info(message)
-                    except Exception as log_err:
-                        print(f"日志记录异常: {str(log_err)}")
-                else:
-                    print(message)  # 如果logging模块不可用，至少打印到控制台
-            except Exception as log_module_err:
-                # 如果无法使用logging，至少尝试打印到控制台
-                try:
-                    print(message)
-                except Exception:
-                    print("<无法打印日志消息>")
-        except Exception as e:
-            # 防止日志处理本身引发异常
-            try:
-                print(f"日志处理过程中发生严重错误: {str(e)}")
-            except Exception:
-                print("日志处理过程中发生无法描述的严重错误")
+            # 只通过回调输出，避免重复
+            if self.log_callback and callable(self.log_callback):
+                self.log_callback(message)
+        except Exception:
+            pass
 
 
     def _load_db_config(self):
@@ -195,7 +166,6 @@ class DatabaseManager(DatabaseInterface):
             try:
                 self.log(f"尝试初始化数据库 (尝试 {attempt + 1}/{self.max_retries})")
                 self.init_database()
-                self.log("数据库初始化成功")
                 return
             except mysql.connector.Error as err:
                 self.log(f"数据库连接错误: {str(err)}")
@@ -213,172 +183,144 @@ class DatabaseManager(DatabaseInterface):
         try:
             self.log("尝试建立数据库连接...")
 
-            # 测试网络连接
-            import socket
-            try:
-                # 先不指定数据库名称连接MySQL服务器
-                conn = mysql.connector.connect(
-                    host=self.config['host'],
-                    port=self.config['port'],
-                    user=self.config['user'],
-                    password=self.config['password'],
-                    connection_timeout=self.config['connection_timeout'],
-                    raise_on_warnings=self.config['raise_on_warnings'],
-                    get_warnings=self.config['get_warnings'],
-                    use_pure=True,
-                    auth_plugin='mysql_native_password'
-                )
-                self.log("成功连接到MySQL服务器")
+            conn = mysql.connector.connect(
+                host=self.config['host'],
+                port=self.config['port'],
+                user=self.config['user'],
+                password=self.config['password'],
+                connection_timeout=self.config['connection_timeout'],
+                raise_on_warnings=self.config['raise_on_warnings'],
+                get_warnings=self.config['get_warnings'],
+                use_pure=True,
+                auth_plugin='mysql_native_password'
+            )
+            self.log("成功连接到MySQL服务器")
 
-                # 保存连接对象
-                self.connection = conn
+            cursor = conn.cursor()
 
-            except mysql.connector.Error as err:
-                self.log(f"MySQL连接错误: {err}")
-                if conn:
-                    try:
-                        conn.close()
-                        self.log("已关闭失败的数据库连接")
-                    except Exception as close_err:
-                        self.log(f"关闭失败的数据库连接时出错: {str(close_err)}")
-                raise mysql.connector.Error(f"连接MySQL服务器失败: {str(err)}")
-            except Exception as e:
-                self.log(f"建立数据库连接时发生未知错误: {str(e)}")
-                if conn:
-                    try:
-                        conn.close()
-                        self.log("已关闭失败的数据库连接")
-                    except Exception as close_err:
-                        self.log(f"关闭失败的数据库连接时出错: {str(close_err)}")
-                raise
+            cursor.execute(f"SHOW DATABASES LIKE '{self.config['database']}'")
+            if not cursor.fetchone():
+                cursor.execute(f"CREATE DATABASE IF NOT EXISTS {self.config['database']}")
+                self.log(f"创建数据库 {self.config['database']}")
+            else:
+                self.log(f"数据库 {self.config['database']} 已存在")
 
-            try:
-                cursor = conn.cursor()
+            cursor.execute(f"USE {self.config['database']}")
 
-                # 检查数据库是否存在
-                cursor.execute(f"SHOW DATABASES LIKE '{self.config['database']}'")
-                database_exists = cursor.fetchone() is not None
+            self._create_tables(cursor)
+            
+            conn.commit()
+            self.log("数据库初始化成功")
 
-                if not database_exists:
-                    self.log(f"尝试创建数据库 {self.config['database']}")
-                    cursor.execute(f"CREATE DATABASE IF NOT EXISTS {self.config['database']}")
-                else:
-                    self.log(f"数据库 {self.config['database']} 已存在")
-
-                cursor.execute(f"USE {self.config['database']}")
-                self.log(f"成功切换到数据库 {self.config['database']}")
-
-                # 检查并创建证书模板表
-                cursor.execute("SHOW TABLES LIKE 'certificate_templates'")
-                if not cursor.fetchone():
-                    cursor.execute("""
-                        CREATE TABLE IF NOT EXISTS certificate_templates (
-                            id INT AUTO_INCREMENT PRIMARY KEY,
-                            name VARCHAR(255) NOT NULL,
-                            validity_period INT NOT NULL,
-                            key_usage VARCHAR(255) NOT NULL,
-                            allowed_roles VARCHAR(50) DEFAULT 'admin,user',
-                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-                        )
-                    """)
-                    self.log("创建证书模板表成功")
-
-                # 检查并创建用户表
-                cursor.execute("SHOW TABLES LIKE 'users'")
-                if not cursor.fetchone():
-                    cursor.execute("""
-                        CREATE TABLE IF NOT EXISTS users (
-                            id INT AUTO_INCREMENT PRIMARY KEY,
-                            username VARCHAR(64) UNIQUE NOT NULL,
-                            password_hash VARCHAR(128) NOT NULL,
-                            role ENUM('admin', 'user') DEFAULT 'user',
-                            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-                        )
-                    """)
-                    self.log("创建用户表成功")
-
-                    # 添加默认用户
-                    cursor.execute("""
-                        INSERT INTO users (username, password_hash, role)
-                        VALUES ('admin', '123456', 'admin'),
-                               ('user', '123456', 'user')
-                    """)
-                    conn.commit()
-                    self.log("添加默认用户成功")
-
-                # 检查并创建证书表
-                cursor.execute("SHOW TABLES LIKE 'certificates'")
-                if not cursor.fetchone():
-                    cursor.execute("""
-                        CREATE TABLE IF NOT EXISTS certificates (
-                            id INT AUTO_INCREMENT PRIMARY KEY,
-                            serial_number VARCHAR(64) UNIQUE NOT NULL,
-                            subject_name VARCHAR(255) NOT NULL,
-                            public_key TEXT NOT NULL,
-                            status ENUM('pending', 'valid', 'revoked') DEFAULT 'pending',
-                            issue_date DATETIME NOT NULL,
-                            expiry_date DATETIME NOT NULL,
-                            signature TEXT NOT NULL,
-                            template_id INT,
-                            organization VARCHAR(255),
-                            department VARCHAR(255),
-                            email VARCHAR(255),
-                            usage VARCHAR(255),
-                            remarks TEXT,
-                            FOREIGN KEY (template_id) REFERENCES certificate_templates(id)
-                        )
-                    """)
-                    self.log("创建证书表成功")
-
-                # 检查并创建模板权限表
-                cursor.execute("SHOW TABLES LIKE 'template_permissions'")
-                if not cursor.fetchone():
-                    cursor.execute("""
-                        CREATE TABLE IF NOT EXISTS template_permissions (
-                            id INT AUTO_INCREMENT PRIMARY KEY,
-                            template_id INT NOT NULL,
-                            user_id INT NOT NULL,
-                            can_use BOOLEAN DEFAULT true,
-                            FOREIGN KEY (template_id) REFERENCES certificate_templates(id),
-                            FOREIGN KEY (user_id) REFERENCES users(id),
-                            UNIQUE KEY unique_template_user (template_id, user_id)
-                        )
-                    """)
-                    self.log("创建模板权限表成功")
-
-                conn.commit()
-                self.log("数据库初始化成功")
-
-            except mysql.connector.Error as err:
-                self.log(f"数据库操作错误: {err}")
-                if conn.is_connected():
-                    try:
-                        conn.rollback()
-                        self.log("已回滚数据库操作")
-                    except Exception as rollback_err:
-                        self.log(f"回滚数据库操作失败: {str(rollback_err)}")
-                raise
-
+        except mysql.connector.Error as err:
+            self.log(f"数据库操作错误: {err}")
+            if conn and conn.is_connected():
+                conn.rollback()
+            raise
         except Exception as e:
             self.log(f"数据库操作失败: {str(e)}")
             raise
-
         finally:
             if cursor:
                 try:
                     cursor.close()
-                    self.log("游标已关闭")
-                except Exception as e:
-                    self.log(f"关闭游标时出错: {str(e)}")
-
+                except Exception:
+                    pass
             if conn:
                 try:
                     if conn.is_connected():
                         conn.close()
-                        self.log("数据库连接已关闭")
-                except Exception as e:
-                    self.log(f"关闭连接时出错: {str(e)}")
+                except Exception:
+                    pass
+
+    def _create_tables(self, cursor):
+        """创建数据库表"""
+        tables = {
+            'certificate_templates': """
+                CREATE TABLE IF NOT EXISTS certificate_templates (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    name VARCHAR(255) NOT NULL,
+                    validity_period INT NOT NULL,
+                    key_usage VARCHAR(255) NOT NULL,
+                    allowed_roles VARCHAR(50) DEFAULT 'admin,user',
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                )
+            """,
+            'users': """
+                CREATE TABLE IF NOT EXISTS users (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    username VARCHAR(64) UNIQUE NOT NULL,
+                    password_hash VARCHAR(128) NOT NULL,
+                    role ENUM('admin', 'user') DEFAULT 'user',
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+            """,
+            'key_pairs': """
+                CREATE TABLE IF NOT EXISTS key_pairs (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    user_id INT NOT NULL,
+                    public_key_encrypted TEXT NOT NULL,
+                    public_key_fingerprint VARCHAR(64) NOT NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    status ENUM('active', 'revoked') DEFAULT 'active',
+                    FOREIGN KEY (user_id) REFERENCES users(id),
+                    UNIQUE KEY unique_fingerprint (public_key_fingerprint)
+                )
+            """,
+            'certificates': """
+                CREATE TABLE IF NOT EXISTS certificates (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    serial_number VARCHAR(64) UNIQUE NOT NULL,
+                    subject_name VARCHAR(255) NOT NULL,
+                    public_key_fingerprint VARCHAR(64) NOT NULL,
+                    status ENUM('pending', 'valid', 'revoked') DEFAULT 'pending',
+                    issue_date DATETIME NOT NULL,
+                    expiry_date DATETIME NOT NULL,
+                    signature TEXT NOT NULL,
+                    template_id INT,
+                    organization VARCHAR(255),
+                    department VARCHAR(255),
+                    email VARCHAR(255),
+                    usage VARCHAR(255),
+                    remarks TEXT,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (template_id) REFERENCES certificate_templates(id)
+                )
+            """,
+            'template_permissions': """
+                CREATE TABLE IF NOT EXISTS template_permissions (
+                    id INT AUTO_INCREMENT PRIMARY KEY,
+                    template_id INT NOT NULL,
+                    user_id INT NOT NULL,
+                    can_use BOOLEAN DEFAULT true,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (template_id) REFERENCES certificate_templates(id),
+                    FOREIGN KEY (user_id) REFERENCES users(id),
+                    UNIQUE KEY unique_template_user (template_id, user_id)
+                )
+            """
+        }
+        
+        for table_name, create_sql in tables.items():
+            cursor.execute(f"SHOW TABLES LIKE '{table_name}'")
+            if not cursor.fetchone():
+                cursor.execute(create_sql)
+                self.log(f"创建表 {table_name} 成功")
+        
+        self._add_default_users(cursor)
+
+    def _add_default_users(self, cursor):
+        """添加默认用户"""
+        cursor.execute("SELECT COUNT(*) FROM users")
+        if cursor.fetchone()[0] == 0:
+            admin_password_hash = self.crypto.sm3_hash('123456')
+            user_password_hash = self.crypto.sm3_hash('123456')
+            cursor.execute("""
+                INSERT INTO users (username, password_hash, role)
+                VALUES (%s, %s, 'admin'), (%s, %s, 'user')
+            """, ('admin', admin_password_hash, 'user', user_password_hash))
+            self.log("添加默认用户成功")
 
     def get_connection(self):
         """从连接池获取连接，并验证连接有效性"""
@@ -790,6 +732,115 @@ class DatabaseManager(DatabaseInterface):
             except:
                 print("验证用户过程中发生严重错误且无法显示错误信息")
             return None
+
+    def get_user_key_pairs(self, user_id: int) -> List[Dict]:
+        """获取用户的所有密钥对
+        
+        Args:
+            user_id: 用户ID
+            
+        Returns:
+            密钥对列表，每个元素包含id, public_key_encrypted, public_key_fingerprint, created_at, status
+        """
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor(dictionary=True)
+            try:
+                cursor.execute("""
+                    SELECT id, public_key_encrypted, public_key_fingerprint, created_at, status
+                    FROM key_pairs
+                    WHERE user_id = %s
+                    ORDER BY created_at DESC
+                """, (user_id,))
+                return cursor.fetchall()
+            finally:
+                cursor.close()
+                conn.close()
+        except Exception as e:
+            self.log(f"获取用户密钥对失败: {str(e)}")
+            return []
+
+    def get_key_pair_by_fingerprint(self, fingerprint: str) -> Optional[Dict]:
+        """通过指纹获取密钥对
+        
+        Args:
+            fingerprint: 公钥指纹
+            
+        Returns:
+            密钥对信息，失败返回None
+        """
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor(dictionary=True)
+            try:
+                cursor.execute("""
+                    SELECT id, user_id, public_key_encrypted, public_key_fingerprint, created_at, status
+                    FROM key_pairs
+                    WHERE public_key_fingerprint = %s
+                """, (fingerprint,))
+                return cursor.fetchone()
+            finally:
+                cursor.close()
+                conn.close()
+        except Exception as e:
+            self.log(f"通过指纹获取密钥对失败: {str(e)}")
+            return None
+
+    def add_key_pair(self, user_id: int, public_key_encrypted: str, fingerprint: str) -> bool:
+        """添加密钥对
+        
+        Args:
+            user_id: 用户ID
+            public_key_encrypted: 加密后的公钥
+            fingerprint: 公钥指纹
+            
+        Returns:
+            成功返回True，失败返回False
+        """
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor()
+            try:
+                cursor.execute("""
+                    INSERT INTO key_pairs (user_id, public_key_encrypted, public_key_fingerprint, status)
+                    VALUES (%s, %s, %s, 'active')
+                """, (user_id, public_key_encrypted, fingerprint))
+                conn.commit()
+                return True
+            finally:
+                cursor.close()
+                conn.close()
+        except Exception as e:
+            self.log(f"添加密钥对失败: {str(e)}")
+            return False
+
+    def get_certificates_by_fingerprint(self, fingerprint: str) -> List[Dict]:
+        """通过公钥指纹获取证书列表
+        
+        Args:
+            fingerprint: 公钥指纹
+            
+        Returns:
+            证书列表
+        """
+        try:
+            conn = self.get_connection()
+            cursor = conn.cursor(dictionary=True)
+            try:
+                cursor.execute("""
+                    SELECT id, serial_number, subject_name, status, issue_date, expiry_date, 
+                           template_id, organization, department, email, usage, remarks, created_at
+                    FROM certificates
+                    WHERE public_key_fingerprint = %s
+                    ORDER BY issue_date DESC
+                """, (fingerprint,))
+                return cursor.fetchall()
+            finally:
+                cursor.close()
+                conn.close()
+        except Exception as e:
+            self.log(f"获取证书列表失败: {str(e)}")
+            return []
 
     def update_user(self, user_id, password_hash=None, role=None):
         """更新用户信息"""

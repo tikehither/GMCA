@@ -4,7 +4,7 @@ import logging
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from crypto_fixed import CryptoUtilsFixed as CryptoUtils
+from crypto_gmssl import GMSCrypto
 from database import DatabaseManager
 from secure_logger import secure_logger_manager
 from typing import Optional, Dict
@@ -16,7 +16,7 @@ class CAServer:
         self.host = host
         self.port = port
         self.log_callback = log_callback
-        self.crypto = CryptoUtils()
+        self.crypto = GMSCrypto()
         self.db = DatabaseManager(log_callback=log_callback)
         self.server = None
         # 添加连接计数器
@@ -28,8 +28,6 @@ class CAServer:
         # 初始化日志模块
         self.logger = secure_logger_manager
         
-        # 初始化加密工具
-        self.crypto._generate_sm2_keys()
         print(f"CA服务器初始化完成，监听地址: {host}:{port}")
         
         # 检查并生成根证书
@@ -354,53 +352,45 @@ class CAServer:
             return {'status': 'error', 'message': '处理请求时发生错误，请稍后重试'}
 
     async def handle_get_certificate_applications(self, data):
-        """处理获取证书申请记录请求"""
+        """处理获取证书申请记录请求（获取pending状态的证书）"""
         try:
             # 参数验证
             if not data or not isinstance(data, dict):
                 return {'status': 'error', 'message': '无效的请求数据'}
             
-            user_id = data.get('user_id')
-        
-            # 获取证书申请记录
+            # 获取pending状态的证书记录（即待审核的证书申请）
             conn = self.db.get_connection()
             cursor = conn.cursor(dictionary=True)
             try:
-                # 如果提供了用户ID，则只获取该用户的申请记录
-                if user_id:
-                    cursor.execute("""
-                        SELECT * FROM certificate_applications 
-                        WHERE user_id = %s
-                        ORDER BY submit_date DESC
-                    """, (user_id,))
-                else:
-                    # 否则获取所有申请记录
-                    cursor.execute("""
-                        SELECT * FROM certificate_applications 
-                        ORDER BY submit_date DESC
-                    """)
+                # 获取所有pending证书记录
+                cursor.execute("""
+                    SELECT serial_number, subject_name, status, issue_date, expiry_date, usage_purpose, template_id
+                    FROM certificates 
+                    WHERE status = 'pending'
+                    ORDER BY issue_date DESC
+                """)
                 
-                applications = cursor.fetchall()
+                certificates = cursor.fetchall()
             
-                # 格式化申请记录
-                formatted_applications = []
-                for app in applications:
-                    formatted_app = {
-                        'serial_number': app['serial_number'],
-                        'subject_name': app['subject_name'],
-                        'status': app['status'],
-                        'submit_date': app['submit_date'].isoformat() if app['submit_date'] else None,
-                        'issue_date': None,  # 证书申请表中没有issue_date字段
-                        'expiry_date': None,  # 证书申请表中没有expiry_date字段
-                        'usage': app.get('usage', ''),
-                        'template_id': app.get('template_id', '')
+                # 格式化证书记录
+                formatted_certificates = []
+                for cert in certificates:
+                    formatted_cert = {
+                        'serial_number': cert['serial_number'],
+                        'subject_name': cert['subject_name'],
+                        'status': cert['status'],
+                        'submit_date': cert['issue_date'].isoformat() if cert['issue_date'] else None,
+                        'issue_date': cert['issue_date'].isoformat() if cert['issue_date'] else None,
+                        'expiry_date': cert['expiry_date'].isoformat() if cert['expiry_date'] else None,
+                        'usage': cert.get('usage_purpose', ''),
+                        'template_id': cert.get('template_id', '')
                     }
-                    formatted_applications.append(formatted_app)
+                    formatted_certificates.append(formatted_cert)
             
-                self.log(f"获取证书申请记录成功，共{len(formatted_applications)}条记录")
+                self.log(f"获取待审核证书申请成功，共{len(formatted_certificates)}条记录")
                 return {
                     'status': 'success',
-                    'data': formatted_applications
+                    'data': formatted_certificates
                 }
             finally:
                 cursor.close()
@@ -517,13 +507,10 @@ class CAServer:
         try:
             # 验证输入数据
             username = data.get('username')
-            password = data.get('password')  # 客户端应该发送密码明文
+            password_hash = data.get('password')  # 客户端已经发送了密码的SM3哈希值
             
-            if not username or not password:
+            if not username or not password_hash:
                 return {'status': 'error', 'message': '用户名或密码不能为空'}
-            
-            # 计算密码哈希 - 使用SM3国密算法
-            password_hash = self.crypto.sm3_hash(password)
             
             self.log(f'收到登录请求: 用户名={username}')
         
@@ -767,6 +754,29 @@ class CAServer:
             if user_id and not self.db.check_template_permission(template_id, user_id):
                 return {'status': 'error', 'message': '用户无权使用此证书模板'}
 
+            # 计算公钥指纹
+            public_key_fingerprint = self.crypto.calculate_public_key_fingerprint(public_key)
+            if not public_key_fingerprint:
+                return {'status': 'error', 'message': '计算公钥指纹失败'}
+            
+            # 保存或获取密钥对记录
+            if user_id:
+                # 检查是否已存在该公钥的记录
+                existing_key_pair = self.db.get_key_pair_by_fingerprint(public_key_fingerprint)
+                if not existing_key_pair:
+                    # 使用SM4加密公钥后存储
+                    public_key_encrypted = self.crypto.sm4_encrypt(public_key)
+                    if not public_key_encrypted:
+                        return {'status': 'error', 'message': '加密公钥失败'}
+                    
+                    # 添加密钥对记录
+                    if not self.db.add_key_pair(user_id, public_key_encrypted, public_key_fingerprint):
+                        return {'status': 'error', 'message': '保存密钥对失败'}
+                else:
+                    # 检查是否属于当前用户
+                    if existing_key_pair['user_id'] != user_id:
+                        return {'status': 'error', 'message': '该公钥已由其他用户注册'}
+
             # 生成证书序列号 - 使用SM3哈希确保唯一性
             timestamp = datetime.now().timestamp()
             serial_number = self.crypto.sm3_hash(f"{subject_name}{timestamp}{public_key}")
@@ -784,7 +794,7 @@ class CAServer:
                 "issue_date": issue_date.isoformat(),
                 "expiry_date": expiry_date.isoformat()
             })
-            signature = self.crypto.sm2_encrypt(cert_data)
+            signature = self.crypto.sm2_sign(cert_data)
 
             # 保存证书，状态设为pending（待审核）
             conn = None
@@ -800,14 +810,14 @@ class CAServer:
                 
                 # 记录SQL语句和参数，便于调试
                 sql = """
-                    INSERT INTO certificate_applications 
-                    (serial_number, subject_name, public_key, status, submit_date, template_id, 
-                     user_id, organization, department, email, `usage`, remarks)
-                    VALUES (%s, %s, %s, 'pending', %s, %s, %s, %s, %s, %s, %s, %s)
+                    INSERT INTO certificates 
+                    (serial_number, subject_name, public_key_fingerprint, status, issue_date, expiry_date, 
+                     signature, template_id, organization, department, email, usage_purpose, user_info)
+                    VALUES (%s, %s, %s, 'pending', %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 """
                 params = (
-                    serial_number, subject_name, public_key, issue_date, template_id,
-                    user_id, organization, department, email, usage, remarks
+                    serial_number, subject_name, public_key_fingerprint, issue_date, expiry_date,
+                    signature, template_id, organization, department, email, usage, remarks
                 )
                 
                 self.log(f"执行SQL: {sql}")
@@ -894,12 +904,12 @@ class CAServer:
             if not cert:
                 return {'status': 'error', 'message': '证书不存在'}
                 
-            # 获取完整证书信息，包括签名和公钥
+            # 获取完整证书信息，包括签名和公钥指纹
             conn = self.db.get_connection()
             cursor = conn.cursor(dictionary=True)
             try:
                 cursor.execute("""
-                    SELECT serial_number, subject_name, public_key, status, 
+                    SELECT serial_number, subject_name, public_key_fingerprint, status, 
                            issue_date, expiry_date, signature
                     FROM certificates
                     WHERE serial_number = %s
@@ -936,7 +946,7 @@ class CAServer:
             cert_data = json.dumps({
                 "serial_number": full_cert['serial_number'],
                 "subject_name": full_cert['subject_name'],
-                "public_key": full_cert['public_key'],
+                "public_key_fingerprint": full_cert['public_key_fingerprint'],
                 "issue_date": full_cert['issue_date'].isoformat(),
                 "expiry_date": full_cert['expiry_date'].isoformat()
             })
@@ -1047,7 +1057,7 @@ class CAServer:
             cursor = conn.cursor(dictionary=True)
             try:
                 cursor.execute("""
-                    SELECT c.serial_number, c.subject_name, c.public_key, c.status, 
+                    SELECT c.serial_number, c.subject_name, c.public_key_fingerprint, c.status, 
                            c.issue_date, c.expiry_date, c.signature, c.template_id,
                            t.name as template_name, t.key_usage
                     FROM certificates c
@@ -1094,13 +1104,13 @@ class CAServer:
             
             # 添加公钥信息
             cert_content += f"\n公钥信息\n------------------\n"
-            # 格式化显示公钥（只显示部分）
-            public_key = cert['public_key']
-            if len(public_key) > 64:
-                formatted_key = public_key[:32] + "..." + public_key[-32:]
+            # 格式化显示公钥指纹（只显示部分）
+            public_key_fingerprint = cert['public_key_fingerprint']
+            if len(public_key_fingerprint) > 64:
+                formatted_key = public_key_fingerprint[:32] + "..." + public_key_fingerprint[-32:]
             else:
-                formatted_key = public_key
-            cert_content += f"公钥: {formatted_key}\n"
+                formatted_key = public_key_fingerprint
+            cert_content += f"公钥指纹: {formatted_key}\n"
             
             # 添加签名信息
             cert_content += f"\n签名信息\n------------------\n"
@@ -1121,7 +1131,7 @@ class CAServer:
                     'status': status_message,
                     'issue_date': cert['issue_date'].isoformat(),
                     'expiry_date': cert['expiry_date'].isoformat(),
-                    'public_key': cert['public_key'],
+                    'public_key_fingerprint': cert['public_key_fingerprint'],
                     'signature': cert['signature']
                 }
             }
@@ -1158,43 +1168,44 @@ class CAServer:
             conn = self.db.get_connection()
             cursor = conn.cursor(dictionary=True)
             try:
-                # 从certificate_applications表中查找待审核的证书申请
+                # 从certificates表中查找待审核的证书申请（pending状态）
                 cursor.execute("""
-                    SELECT * FROM certificate_applications 
+                    SELECT serial_number, subject_name, public_key_fingerprint, status, issue_date, expiry_date, usage_purpose, template_id, organization, department, email
+                    FROM certificates 
                     WHERE serial_number = %s AND status = 'pending'
                 """, (serial_number,))
-                application = cursor.fetchone()
+                certificate = cursor.fetchone()
                 
-                if not application:
+                if not certificate:
                     return {'status': 'error', 'message': '证书不存在或状态不是待审核'}
                 
                 # 设置证书有效期
                 issue_date = datetime.now()
                 # 获取证书模板以确定有效期
-                template_id = application.get('template_id')
+                template_id = certificate.get('template_id')
                 template = self.db.get_certificate_template(template_id)
                 validity_period = template.get('validity_period', 365) if template else 365  # 默认1年
                 expiry_date = issue_date + timedelta(days=validity_period)
                 
                 # 1. 生成证书内容
                 cert_data = json.dumps({
-                    "serial_number": application['serial_number'],
-                    "subject_name": application['subject_name'],
-                    "public_key": application['public_key'],
+                    "serial_number": certificate['serial_number'],
+                    "subject_name": certificate['subject_name'],
+                    "public_key_fingerprint": certificate['public_key_fingerprint'],
                     "issue_date": issue_date.isoformat(),
                     "expiry_date": expiry_date.isoformat(),
-                    "organization": application.get('organization', ''),
-                    "department": application.get('department', ''),
-                    "email": application.get('email', ''),
-                    "usage": application.get('usage', '')
+                    "organization": certificate.get('organization', ''),
+                    "department": certificate.get('department', ''),
+                    "email": certificate.get('email', ''),
+                    "usage": certificate.get('usage_purpose', '')
                 }, sort_keys=True)
                 
                 # 构建用户信息字段
                 user_info = {
-                    "name": application['subject_name'].split('CN=')[1].split(',')[0] if 'CN=' in application['subject_name'] else '',
-                    "organization": application.get('organization', ''),
-                    "department": application.get('department', ''),
-                    "email": application.get('email', '')
+                    "name": certificate['subject_name'].split('CN=')[1].split(',')[0] if 'CN=' in certificate['subject_name'] else '',
+                    "organization": certificate.get('organization', ''),
+                    "department": certificate.get('department', ''),
+                    "email": certificate.get('email', '')
                 }
                 user_info_json = json.dumps(user_info)
                 
@@ -1218,10 +1229,10 @@ class CAServer:
                 cert_file_content = f"""
                 -----BEGIN CERTIFICATE-----
                     序列号: {serial_number}
-                    主题: {application['subject_name']}
+                    主题: {certificate['subject_name']}
                     颁发者: CA Authority
                     有效期: {issue_date.strftime('%Y-%m-%d %H:%M:%S')} 至 {expiry_date.strftime('%Y-%m-%d %H:%M:%S')}
-                    用途: {application.get('usage', '')}
+                    用途: {certificate.get('usage_purpose', '')}
                     哈希值: {cert_hash}
                 -----END CERTIFICATE-----"""
                 
@@ -1234,42 +1245,31 @@ class CAServer:
                     self.log(f"证书文件保存失败: {file_err}")
                     return {'status': 'error', 'message': f'保存证书文件失败: {str(file_err)}'}
                 
-                # 5. 将证书信息保存到数据库
+                # 5. 更新certificates表中的证书状态为valid
                 cursor.execute("""
-                    INSERT INTO certificates (
-                        serial_number, subject_name, public_key, user_info, status, 
-                        issue_date, expiry_date, usage_purpose, cert_hash, signature, 
-                        template_id, organization, department, email
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    UPDATE certificates 
+                    SET status = 'valid',
+                        issue_date = %s,
+                        expiry_date = %s,
+                        user_info = %s,
+                        cert_hash = %s,
+                        signature = %s
+                    WHERE serial_number = %s
                 """, (
-                    application['serial_number'],
-                    application['subject_name'],
-                    application['public_key'],
-                    user_info_json,
-                    'valid',  # 设置状态为有效
                     issue_date,
                     expiry_date,
-                    application.get('usage', ''),
+                    user_info_json,
                     cert_hash,
                     signature,
-                    template_id,
-                    application.get('organization', ''),
-                    application.get('department', ''),
-                    application.get('email', '')
+                    serial_number
                 ))
-                
-                # 删除certificate_applications表中的申请记录
-                cursor.execute("""
-                    DELETE FROM certificate_applications 
-                    WHERE serial_number = %s
-                """, (serial_number,))
                 
                 conn.commit()
                 
                 # 记录证书签发事件
                 certificate_data = {
                     'serial_number': serial_number,
-                    'subject_name': application['subject_name'],
+                    'subject_name': certificate['subject_name'],
                     'issuer_name': 'CN=CA Root,O=CA机构,C=CN',
                     'valid_from': issue_date.isoformat(),
                     'valid_to': expiry_date.isoformat(),
@@ -1301,12 +1301,12 @@ class CAServer:
             self.log(f'处理证书审核错误: {e}')
             return {'status': 'error', 'message': str(e)}
     
-    async def handle_change_password(self, data):
+    async def handle_change_password(self, data, client_addr=None):
         """处理修改密码请求"""
         try:
             # 参数验证
             if not data or not isinstance(data, dict):
-                return {'status': 'error', 'message': '无效的请7求数据'}
+                return {'status': 'error', 'message': '无效的请求数据'}
                 
             current_password = data.get('current_password')
             new_password = data.get('new_password')
@@ -1338,21 +1338,37 @@ class CAServer:
                 user = cursor.fetchone()
                 
                 if not user:
+                    cursor.close()
+                    conn.close()
                     return {'status': 'error', 'message': '当前密码不正确'}
                 
-                # 更新密码
-                cursor.execute("""
+                # 关闭当前游标，为更新操作创建新游标
+                cursor.close()
+                
+                # 创建新游标执行更新操作
+                update_cursor = conn.cursor()
+                update_cursor.execute("""
                     UPDATE users 
                     SET password_hash = %s 
                     WHERE id = %s
                 """, (new_password_hash, user['id']))
                 
                 conn.commit()
+                update_cursor.close()
+                conn.close()
                 self.log(f"用户 {user['username']} 修改了密码")
                 return {'status': 'success', 'message': '密码修改成功'}
+            except Exception as db_err:
+                if conn:
+                    conn.rollback()
+                    conn.close()
+                raise db_err
             finally:
-                cursor.close()
-                conn.close()
+                if cursor:
+                    try:
+                        cursor.close()
+                    except:
+                        pass
         except Exception as e:
             self.log(f'处理修改密码请求失败: {e}')
             return {'status': 'error', 'message': f'修改密码失败: {str(e)}'}
@@ -1404,7 +1420,8 @@ class CAServer:
             cursor = conn.cursor(dictionary=True)
             try:
                 cursor.execute("""
-                    SELECT * FROM certificate_applications 
+                    SELECT serial_number, subject_name, status
+                    FROM certificates 
                     WHERE serial_number = %s AND status = 'pending'
                 """, (serial_number,))
                 cert = cursor.fetchone()
@@ -1412,9 +1429,10 @@ class CAServer:
                 if not cert:
                     return {'status': 'error', 'message': '证书不存在或状态不是待审核'}
                 
-                # 删除被拒绝的证书申请
+                # 更新证书状态为rejected
                 cursor.execute("""
-                    DELETE FROM certificate_applications
+                    UPDATE certificates
+                    SET status = 'rejected'
                     WHERE serial_number = %s
                 """, (serial_number,))
                 conn.commit()

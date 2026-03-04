@@ -14,6 +14,8 @@ class CAClient(QMainWindow):
         self.client.error_occurred.connect(self.handle_error)
         # 从client实例获取用户信息
         self.user_info = getattr(client, 'user_info', None)
+        # 从client实例获取加密工具
+        self.crypto = getattr(client, 'crypto', None)
         # 默认密钥和证书保存路径
         self.key_save_dir = os.path.join(os.path.expanduser('~'), '.ca_client')
         self.cert_save_dir = os.path.join(self.key_save_dir, 'certificates')
@@ -413,8 +415,13 @@ class CAClient(QMainWindow):
     def generate_key_pair(self):
         try:
             # 使用CryptoManager生成密钥对
-            from crypto import CryptoManager
-            crypto_manager = CryptoManager()
+            from crypto_gmssl import ClientGMSCrypto as CryptoManager
+            
+            # 如果client中有crypto实例，使用它；否则创建新的
+            if self.crypto:
+                crypto_manager = self.crypto
+            else:
+                crypto_manager = CryptoManager()
             
             # 先检查是否已经存在密钥
             private_key, public_key = crypto_manager.load_or_generate_sm2_key_pair()
@@ -873,10 +880,47 @@ class CAClient(QMainWindow):
                 QMessageBox.warning(self, '警告', '请先生成密钥对')
                 return
             
+            # 提示用户保存密钥对
+            reply = QMessageBox.question(self, '保存密钥对', 
+                                        '在提交证书申请前，建议先保存您的密钥对。\n'
+                                        '私钥将存储在本地，用于后续证书操作。\n'
+                                        '是否现在保存密钥对？',
+                                        QMessageBox.Yes | QMessageBox.No, 
+                                        QMessageBox.Yes)
+            
+            if reply == QMessageBox.Yes:
+                # 打开文件夹选择对话框
+                directory = QFileDialog.getExistingDirectory(self, '选择密钥保存目录', self.key_save_dir)
+                if directory:  # 如果用户选择了目录
+                    save_dir = directory
+                    
+                    # 使用crypto_manager保存密钥对
+                    if hasattr(self, 'crypto_manager') and self.crypto_manager:
+                        self.crypto_manager.save_sm2_key_pair(save_dir)
+                        self.crypto_manager.save_sm4_key(save_dir)
+                    elif hasattr(self, 'private_key') and hasattr(self, 'public_key'):
+                        # 兼容旧方式，直接保存文件
+                        os.makedirs(save_dir, exist_ok=True)
+                        # 保存私钥
+                        private_key_path = os.path.join(save_dir, 'client_private.key')
+                        with open(private_key_path, 'w') as f:
+                            f.write(self.private_key)
+                        # 保存公钥
+                        public_key_path = os.path.join(save_dir, 'client_public.key')
+                        with open(public_key_path, 'w') as f:
+                            f.write(self.public_key)
+                        QMessageBox.information(self, '成功', f'密钥对已保存到: {save_dir}')
+                    else:
+                        QMessageBox.warning(self, '警告', '无法保存密钥对：未找到密钥数据')
+            
             # 确保有crypto_manager实例
             if not hasattr(self, 'crypto_manager'):
-                from crypto import CryptoManager
-                self.crypto_manager = CryptoManager()
+                # 如果client中有crypto实例，使用它；否则创建新的
+                if self.crypto:
+                    self.crypto_manager = self.crypto
+                else:
+                    from crypto_gmssl import ClientGMSCrypto as CryptoManager
+                    self.crypto_manager = CryptoManager()
             
             # 构建主题名称字符串 (Distinguished Name)
             subject_name = f"CN={application_data['applicant_name']}"
@@ -918,44 +962,34 @@ class CAClient(QMainWindow):
             if response and response.get('status') == 'success':
                 cert_data = response.get('data', {})
                 
-                # 如果服务器直接返回了签名证书，保存它
-                if 'certificate' in cert_data:
-                    cert_content = cert_data.get('certificate')
-                    if cert_content:
-                        # 保存证书
-                        cert_dir = os.path.join(self.cert_save_dir, 'certificates')
-                        os.makedirs(cert_dir, exist_ok=True)
-                        cert_path = os.path.join(cert_dir, f"cert_{cert_data.get('serial_number', 'new')}.cer")
-                        
-                        # 使用crypto_manager保存证书
-                        self.crypto_manager.save_certificate(cert_content, cert_path)
-                        
-                        self.apply_result.setText(
-                            f"证书申请成功并已签发！\n\n"
-                            f"证书序列号: {cert_data.get('serial_number', '未知')}\n"
-                            f"主题名称: {cert_data.get('subject', subject_name)}\n"
-                            f"状态: 已签发\n"
-                            f"证书已保存到: {cert_path}"
-                        )
-                        QMessageBox.information(self, '成功', f'证书申请成功并已签发！\n证书已保存到:\n{cert_path}')
+                # 如果服务器返回了证书数据，显示成功信息
+                self.apply_result.setText(
+                    f"证书申请成功！\n\n"
+                    f"证书序列号: {cert_data.get('serial_number', '未知')}\n"
+                    f"主题名称: {cert_data.get('subject_name', subject_name)}\n"
+                    f"状态: {cert_data.get('status', '待审核')}\n"
+                    f"申请时间: {cert_data.get('issue_date', '未知')}\n"
+                    f"公钥指纹: {cert_data.get('public_key_fingerprint', '未知')}"
+                )
+                
+                # 提示用户保存密钥对（如果需要）
+                save_keys = QMessageBox.question(
+                    self, 
+                    '保存密钥对', 
+                    '证书申请已提交成功！\n是否要保存当前的密钥对到本地？',
+                    QMessageBox.Yes | QMessageBox.No,
+                    QMessageBox.Yes
+                )
+                
+                if save_keys == QMessageBox.Yes:
+                    # 保存密钥对到本地
+                    key_save_dir = os.path.join(self.cert_save_dir, 'keys')
+                    if self.crypto_manager.save_sm2_key_pair(key_save_dir):
+                        QMessageBox.information(self, '成功', f'密钥对已保存到:\n{key_save_dir}')
                     else:
-                        self.apply_result.setText(
-                            f"证书申请成功！\n\n"
-                            f"证书序列号: {cert_data.get('serial_number', '未知')}\n"
-                            f"主题名称: {cert_data.get('subject', subject_name)}\n"
-                            f"状态: {cert_data.get('status', '待审核')}\n"
-                            f"申请时间: {cert_data.get('issue_date', '未知')}"
-                        )
-                        QMessageBox.information(self, '成功', '证书申请已提交，等待审核！')
-                else:
-                    self.apply_result.setText(
-                        f"证书申请成功！\n\n"
-                        f"证书序列号: {cert_data.get('serial_number', '未知')}\n"
-                        f"主题名称: {cert_data.get('subject', subject_name)}\n"
-                        f"状态: {cert_data.get('status', '待审核')}\n"
-                        f"申请时间: {cert_data.get('issue_date', '未知')}"
-                    )
-                    QMessageBox.information(self, '成功', '证书申请已提交，等待审核！')
+                        QMessageBox.warning(self, '警告', '密钥对保存失败，请手动备份')
+                
+                QMessageBox.information(self, '成功', '证书申请已提交，等待服务器审核！')
             else:
                 error_msg = response.get('message', '申请失败') if response else '申请失败，请稍后重试'
                 self.apply_result.setText(f"证书申请失败：{error_msg}")
@@ -963,94 +997,6 @@ class CAClient(QMainWindow):
             
         except Exception as e:
             QMessageBox.critical(self, '错误', f'提交证书申请失败: {str(e)}')
-
-    class ChangePasswordDialog(QDialog):
-        def __init__(self, parent=None):
-            super().__init__(parent)
-            self.parent = parent
-            self.setWindowTitle('修改密码')
-            self.setFixedSize(400, 300)
-
-            layout = QVBoxLayout()
-            layout.setSpacing(20)
-            layout.setContentsMargins(30, 30, 30, 30)
-
-            # 当前密码
-            current_password_layout = QHBoxLayout()
-            current_password_label = QLabel('当前密码')
-            self.current_password_input = QLineEdit()
-            self.current_password_input.setEchoMode(QLineEdit.Password)
-            self.current_password_input.setPlaceholderText('请输入当前密码')
-            current_password_layout.addWidget(current_password_label)
-            current_password_layout.addWidget(self.current_password_input)
-            layout.addLayout(current_password_layout)
-
-            # 新密码
-            new_password_layout = QHBoxLayout()
-            new_password_label = QLabel('新密码')
-            self.new_password_input = QLineEdit()
-            self.new_password_input.setEchoMode(QLineEdit.Password)
-            self.new_password_input.setPlaceholderText('请输入新密码')
-            new_password_layout.addWidget(new_password_label)
-            new_password_layout.addWidget(self.new_password_input)
-            layout.addLayout(new_password_layout)
-
-            # 确认新密码
-            confirm_password_layout = QHBoxLayout()
-            confirm_password_label = QLabel('确认新密码')
-            self.confirm_password_input = QLineEdit()
-            self.confirm_password_input.setEchoMode(QLineEdit.Password)
-            self.confirm_password_input.setPlaceholderText('请再次输入新密码')
-            confirm_password_layout.addWidget(confirm_password_label)
-            confirm_password_layout.addWidget(self.confirm_password_input)
-            layout.addLayout(confirm_password_layout)
-
-            # 确认按钮
-            button_layout = QHBoxLayout()
-            self.confirm_btn = QPushButton('确认修改')
-            self.confirm_btn.clicked.connect(self.change_password)
-            self.cancel_btn = QPushButton('取消')
-            self.cancel_btn.clicked.connect(self.reject)
-            button_layout.addWidget(self.confirm_btn)
-            button_layout.addWidget(self.cancel_btn)
-            layout.addLayout(button_layout)
-
-            self.setLayout(layout)
-
-        def change_password(self):
-            current_password = self.current_password_input.text()
-            new_password = self.new_password_input.text()
-            confirm_password = self.confirm_password_input.text()
-            
-            if not all([current_password, new_password, confirm_password]):
-                QMessageBox.warning(self, '警告', '请填写所有密码字段')
-                return
-            
-            if new_password != confirm_password:
-                QMessageBox.warning(self, '警告', '两次输入的新密码不一致')
-                return
-            
-            try:
-                # 获取用户ID，如果parent有user_info属性
-                user_id = None
-                if hasattr(self.parent, 'user_info') and self.parent.user_info:
-                    user_id = self.parent.user_info.get('id')
-                
-                # 发送修改密码请求
-                response = self.parent.client.send_request('change_password', {
-                    'current_password': current_password,
-                    'new_password': new_password,
-                    'user_id': user_id
-                })
-                
-                if response and response.get('status') == 'success':
-                    QMessageBox.information(self, '成功', '密码修改成功')
-                    self.accept()
-                else:
-                    error_msg = response.get('message', '密码修改失败') if response else '密码修改失败，请稍后重试'
-                    QMessageBox.warning(self, '失败', error_msg)
-            except Exception as e:
-                QMessageBox.critical(self, '错误', f'修改密码时发生错误: {str(e)}')
 
     def open_certificate_application_dialog(self, template_id, template_name):
         """打开证书申请对话框"""
@@ -1398,3 +1344,94 @@ class CAClient(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, '错误', f'验证证书失败: {str(e)}')
             self.verify_result.setText(f"验证过程发生错误: {str(e)}")
+
+
+class ChangePasswordDialog(QDialog):
+    """修改密码对话框"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.parent = parent
+        self.setWindowTitle('修改密码')
+        self.setFixedSize(400, 300)
+
+        layout = QVBoxLayout()
+        layout.setSpacing(20)
+        layout.setContentsMargins(30, 30, 30, 30)
+
+        # 当前密码
+        current_password_layout = QHBoxLayout()
+        current_password_label = QLabel('当前密码')
+        self.current_password_input = QLineEdit()
+        self.current_password_input.setEchoMode(QLineEdit.Password)
+        self.current_password_input.setPlaceholderText('请输入当前密码')
+        current_password_layout.addWidget(current_password_label)
+        current_password_layout.addWidget(self.current_password_input)
+        layout.addLayout(current_password_layout)
+
+        # 新密码
+        new_password_layout = QHBoxLayout()
+        new_password_label = QLabel('新密码')
+        self.new_password_input = QLineEdit()
+        self.new_password_input.setEchoMode(QLineEdit.Password)
+        self.new_password_input.setPlaceholderText('请输入新密码')
+        new_password_layout.addWidget(new_password_label)
+        new_password_layout.addWidget(self.new_password_input)
+        layout.addLayout(new_password_layout)
+
+        # 确认新密码
+        confirm_password_layout = QHBoxLayout()
+        confirm_password_label = QLabel('确认新密码')
+        self.confirm_password_input = QLineEdit()
+        self.confirm_password_input.setEchoMode(QLineEdit.Password)
+        self.confirm_password_input.setPlaceholderText('请再次输入新密码')
+        confirm_password_layout.addWidget(confirm_password_label)
+        confirm_password_layout.addWidget(self.confirm_password_input)
+        layout.addLayout(confirm_password_layout)
+
+        # 确认按钮
+        button_layout = QHBoxLayout()
+        self.confirm_btn = QPushButton('确认修改')
+        self.confirm_btn.clicked.connect(self.change_password)
+        self.cancel_btn = QPushButton('取消')
+        self.cancel_btn.clicked.connect(self.reject)
+        button_layout.addWidget(self.confirm_btn)
+        button_layout.addWidget(self.cancel_btn)
+        layout.addLayout(button_layout)
+
+        self.setLayout(layout)
+
+    def change_password(self):
+        current_password = self.current_password_input.text()
+        new_password = self.new_password_input.text()
+        confirm_password = self.confirm_password_input.text()
+        
+        if not all([current_password, new_password, confirm_password]):
+            QMessageBox.warning(self, '警告', '请填写所有密码字段')
+            return
+        
+        if new_password != confirm_password:
+            QMessageBox.warning(self, '警告', '两次输入的新密码不一致')
+            return
+        
+        try:
+            # 获取用户ID，如果parent有user_info属性
+            user_id = None
+            if hasattr(self.parent, 'user_info') and self.parent.user_info:
+                user_id = self.parent.user_info.get('id')
+            
+            # 发送修改密码请求
+            response = self.parent.client.send_request('change_password', {
+                'current_password': current_password,
+                'new_password': new_password,
+                'user_id': user_id
+            })
+            
+            if response and response.get('status') == 'success':
+                QMessageBox.information(self, '成功', '密码修改成功')
+                self.accept()
+            else:
+                error_msg = response.get('message', '密码修改失败') if response else '密码修改失败，请稍后重试'
+                QMessageBox.warning(self, '失败', error_msg)
+        except Exception as e:
+            QMessageBox.critical(self, '错误', f'修改密码时发生错误: {str(e)}')
